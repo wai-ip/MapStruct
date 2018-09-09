@@ -1,0 +1,383 @@
+classdef MapStruct
+    % MAPSTRUCT Multi-key mapping object
+    %
+    % MS = MAPSTRUCT(S, K, V) transforms the size-consistent scalar struct S
+    % to a multi-key mapping object MS. S consists of at least a key field
+    % and a value filed. Each field contains a column of cell string or
+    % numerical array. They key and values fields in S are specified by a
+    % one-dimension cell array of string K and V respectively.
+    %
+    % MAPSTRUCT takes a size-consistent scalar struct as a multi-field
+    % mapping data set. Each element at the same position across the
+    % key/value fields is regarded as a specific key/value component. These
+    % components are combined to create a unique key/value ID for each
+    % position. The combined key ID must be unique in the final mapping
+    % object.
+    
+   properties (GetAccess = public, SetAccess = immutable)
+       
+       % Overview of the MapStruct object.
+       Count
+       keyName
+       keyType
+       valueName
+       valueType
+       
+   end
+   
+   properties (Hidden, GetAccess = protected, SetAccess = immutable)
+       
+       % Single mapping object.
+       map_kID_vID
+       
+       % Struct of single mapping objects.
+       structmap_key_id
+       structmap_vID_value
+       
+   end
+   
+   methods (Access = public)
+       
+       function obj = MapStruct(mapStruct, keyName, valueName)
+           
+           import MapStruct
+           
+           % Check no. of input arguments.
+           narginchk(2, 3)
+           
+           % Parse input arguments.
+           p = inputParser;
+           p.StructExpand = false;
+           p.FunctionName = 'MapStruct';
+           
+           vName      = @(x) MapStruct.validName(x);
+           vMapStruct = @(x) MapStruct.validStruct(x);
+       
+           p.addRequired('mapStruct', vMapStruct);
+           p.addRequired('keyNmae',   vName);
+           p.addRequired('valueName', vName);
+           
+           p.parse(mapStruct, keyName, valueName);
+           
+           mapStruct = p.Results.mapStruct;
+           keyName   = p.Results.keyName;
+           valueName = p.Results.valueName;
+           
+           % Extract field name and no. of fields from mapStruct.
+           fieldName = fieldnames(mapStruct);
+           count     = numel(mapStruct.(fieldName{1}));
+           
+           % Check whether key names are included in field names.
+           assert(all(ismember(keyName, fieldName)), ...
+               'MapStruct:InvalidKeyName', 'Key name not found in mapping.')
+           
+           % Check whether value names are included in field names.
+           assert(all(ismember(valueName, fieldName)), ...
+               'MapStruct:InvalidValueName', 'Value name not found in mapping.')   
+       
+           % Separate structs of keys and values from map Struct.
+           keyStruct   = struct();
+           valueStruct = struct();
+           for i = 1:numel(fieldName)
+               fName = fieldName{i};
+               if ismember(fName, valueName)
+                   valueStruct.(fName) = mapStruct.(fName);
+               elseif ismember(fName, keyName)
+                   keyStruct.(fName)   = mapStruct.(fName);
+               end
+           end
+           
+           % Assign unique keys/values into structs.
+           uniqueKey   = structfun(@unique, keyStruct,   'UniformOutput', false);
+           uniqueValue = structfun(@unique, valueStruct, 'UniformOutput', false);
+           
+           % A prelimiary check for key uniqueness.
+           nUniqueKey = structfun(@numel, uniqueKey);
+           assert(prod(nUniqueKey) > count, ...
+               'MapStruct:KeyDuplication', 'Duplicated keys.')
+           
+           % Return key types and value types.
+           keyType   = structfun(@class, keyStruct,   'UniformOutput', false);
+           valueType = structfun(@class, valueStruct, 'UniformOutput', false);
+           
+           % ---------------- Create mapping objects. ------------------
+           % 'id' - the identity for keys/values in each field. i.e. 99_
+           % 'ID' - the concatenated id across fields. i.e. 1_99_8_
+           
+           % 1. Create a struct of mapping object for each field in unique
+           % keys/values. Each field is mapped to a custom ID i.e. 1_, 20_
+           createId  = @(x) strtrim(cellstr(num2str((1:numel(x))', '%d_')));
+           structmap_key_id = structfun(@(x)   containers.Map(x, createId(x)), uniqueKey,   'UniformOutput', false);
+           structmap_value_id = structfun(@(x) containers.Map(x, createId(x)), uniqueValue, 'UniformOutput', false);
+           
+           % 2. Map the id for all key and value elements.
+           keyIdStruct   = MapStruct.mapIdStruct(structmap_key_id,   keyStruct);
+           valueIdStruct = MapStruct.mapIdStruct(structmap_value_id, valueStruct);
+           
+           % 3. Generate concatenated ID.
+           keyID   = MapStruct.genID(keyIdStruct);
+           valueID = MapStruct.genID(valueIdStruct);
+           
+           % 4. Check for uniqueness of concatenated keyID.
+           assert(numel(unique(keyID)) == count, ...
+               'MapStruct:KeyDuplication', 'Duplicated keys.')
+           
+           % 5. Create unique keyID-valueID mapping object.
+           map_kID_vID = containers.Map(keyID, valueID);
+           
+           % 6. Create struct of valueID-value reverse mapping.
+           structmap_vID_value = structfun(@(x) containers.Map(valueID, x), valueStruct, 'UniformOutput', false);
+           
+           % Create the object.
+           obj.Count               = count;
+           obj.keyName             = keyName;
+           obj.keyType             = keyType;
+           obj.valueName           = valueName;
+           obj.valueType           = valueType;
+           obj.map_kID_vID         = map_kID_vID;
+           obj.structmap_vID_value = structmap_vID_value;
+           obj.structmap_key_id    = structmap_key_id;
+           
+       end    
+   end
+   
+   methods (Hidden, Static, Access = protected)
+       
+       function validStruct(inStruct)
+           % VALIDSTRUCT Validate struct input.
+           %
+           % VALIDSTRUCT(S) validates the input struct format by checking
+           % whether the input is a struct, and inside which the fields are
+           % single column cell-string or numeric data with consistent
+           % array size.
+           
+           % Check input data type.
+           assert(isstruct(inStruct), ...
+               'MapStruct:validStruct:InvalidInputDataType', 'Input mapping should be a struct.')
+           
+           % Check field type in struct.
+           vFieldType = @(x) iscolumn(x) && (iscellstr(x) || isnumeric(x));
+           assert(all(structfun(vFieldType, inStruct)), ...
+               'MapStruct:validStruct"UnmatachedFieldType', 'Each field in mapping should contain a cell string or numerical column only.')
+           
+           % Check field size.
+           assert(numerl(unique(structfun(@numel, inStruct))) == 1, ...
+               'MapStruct:validStruct:InconsistentFieldSize', 'Inconsistent no. of elements across fields.')
+           
+       end
+       
+       function validName(inName)
+           % VALIDNAME Validate name input.
+           %
+           % VALIDNAME(N) validates the input name format by checking
+           % whether the input is a non-empty cell-string vector.
+           
+           % Check input name data type.
+           vNameType = @(x) iscellstr(X) && ~isempty(x) && isvector(x);
+           assert(vNameType(inName), ...
+               'MapStruct:validName:InvalidInputNameDataType', 'Name input should be a one-dimension cell string.')
+           
+       end
+       
+       function id = mapIdStruct(map_field_id, inStruct)
+            % MAPIDSTRUCT Map for all field elements in struct.
+            %
+            % ID = MAPIDSTRUCT(M, S) returns a struct of fields ID by
+            % mapping the corresponding field in M, which is a struct of
+            % mapping object, to S, which s a struct containing fields
+            % which also exists in M.
+            
+            % Extract field names from inputs.
+            id = struct();
+            fNameMap    = fieldnames(map_field_id);
+            fNameStruct = fieldnames(inStruct);
+            
+            % Check field existence in mapping object.
+            assert(all(ismember(fNameStruct, fNameMap)), ...
+                'MapStruct:mapIdStruct:NameMismatch', 'Field not found in mapping.')
+            
+            % If the key input is numeric but the mapping is cell string
+            % converted from number, convert the keys to cell string.
+            for i =1:numel(fNameStruct)
+                if isa(inStruct.(fNameStruct{i}), 'numeric') && ...
+                        strcmp(map_field_id.(fNameMap{i}).KeyType, 'char')
+                    inStruct.(fNameStruct{i}) = cellstr( ...
+                                                num2str( ...
+                                                inStruct.(fNameStruct{i})));
+                end
+            end
+            
+            % Perform mapping for each field.
+            for i =1:numel(fNameStruct)
+                fName = fNameStruct{i};
+                field = inStruct.(fName);
+                if isa(field, 'numeric')
+                    field = num2cell(field);
+                end
+                
+                % Map fields.
+                id.(fName) = values(map_field_id.(fName), field);
+            end
+            
+       end
+       
+       function ID = genID(idStruct)
+           % GENID Generate concatenated ID.
+           %
+           % ID = GENID(S) Returns a cell-string array by concatenating the
+           % elements at the same position across fields in S.
+           
+           % Concatenate id.
+           ID = '';
+           fNames = fieldnames(idStruct);
+           for i = 1:numel(fNames)
+               ID = strcat(ID, idStruct.(fNames{i}));
+           end
+           
+       end
+       
+   end
+   
+   methods (Access = public)
+       
+       function valueSet = msvalues(obj, inKeyStruct, inKeyName, varargin)
+           % MSVALUES Map struct key input to values by MapStruct object.
+           %
+           % VS = MSVALUES(MS) returns a struct of cell-string arrays
+           % containing the unique mapping values in MapStruct MS.
+           %
+           % VS = MSVALUES(MS, S, K) returns a struct of mapped values VS
+           % by mapping the fields in key struct S to the corresponding
+           % fields in the mapping object MS. K is a cell-string array in
+           % the same size as the keyName property in MS. Each element in K
+           % refers to the field name in S matching the keyName at the same
+           % position in MS.
+           %
+           % Example:
+           %
+           % S is a scalar struct containing four fields:
+           %
+           %        fieldnames(S) = 
+           %            1x4 cell array
+           %            'Seniority'  'MatYrs'  'Rating'  'Term'
+           %
+           % K indicates which fields in S are keys for mapping, and the
+           % position of name should match the corresponding mapping field
+           % as specified by keyName in MapStruct:
+           %
+           %        K = {'Rating, 'MatYrs' , 'Seniority'};
+           %        MS.keyName = 
+           %            1x3 cell array
+           %            'BaselRating'  'Maturity'  'IsSenior'
+           %
+           % VS = MSVALUES(..., V) specifies the value fields in MS to be
+           % returned. V should be an element of the valueName property in
+           % MS.
+           
+           % Check for no. of input arguments.
+           narginchk(1, 4)
+           
+           % Extract keyName and valueName from the input MapStruct.
+           mValueName = obj.valueName;
+           mKeyName   = obj.keyName;
+           
+           % Process control based on no. of input arguments.
+           switch nargin
+               
+               case 1
+                   
+                    % Return unique mapping values in MapStruct.
+                    valueSet = structfun(@values, obj.structmap_vID_value, 'UniformOutput', false);
+                    return
+                    
+               case 3
+                   
+                   % Check input key name data type.
+                   vNameType = @(x) iscellstr(x) && ~isempty(x) && isvector(x);
+                   assert(vNameType(inKeyName), ...
+                       'MapStruct:valueSet:InvalidInputNameDataType', 'Name input should be a one-dimension cell string.')
+                   
+                   % Check no. of input key names.
+                   assert(numel(mKeyName) == numel(inKeyName), ...
+                       'MapStruct:valueSet:InvalidKeyNameSize', 'Size of input key name does not match that of the mapping key names.');
+                   
+                   % Specify target value fields.
+                   inValueName = mValueName;
+                   
+               case 4
+                   
+                   % Extract and check for value name input.
+                   inValueName = varargin{1};
+                   obj.validName(inValueName)
+                   assert(all(ismember(inValueName, vValueName)), ...
+                       'MapStruct:valueSet:InvalidInputValueName', 'Value name not found in mapping.')
+                   
+               otherwise
+                   
+                   % Return error for other no. of input arguments.
+                   error('MapStruct:valueSet:InvalidNumberOfInputs', 'Invalid number of input arguments.')
+                   
+           end
+           
+           % Extract field names from key struct input.
+           fNameInStruct = fieldnames(inKeyStruct);
+           
+           % Validate the field names.
+           obj.vaidStruct(inKeyStruct)
+           
+           % Remove irrelevant fields from key struct input.
+           for i =1:numel(fNameInStruct)
+               if ~ismember(fNameInStruct{i}, inKeyName)
+                   inKeyStruct = rmfield(inKeyStruct, fNameInStruct{i});
+               end
+           end
+           
+           % Change the key names to the corresponding ones in MapStruct.
+           for i = 1:numel(inKeyName)
+               if ~strcmp(mKeyName{i}, inKeyName{i})
+                   inKeyStruct.(mKeyName{i}) = inKeyStruct.(inKeyName{i});
+                   inKeyStruct = rmfield(inKeyStruct, inKeyName{i});
+               end
+           end
+           inKeyStruct = orderfields(inKeyStruct, mKeyName);
+           
+           % Map the id for all key elements.
+           kId = obj.mapIdStruct(obj.structmap_key_id, inKeyStruct);
+           
+           % Generate concatenated ID.
+           kID = obj.genID(kId);
+           
+           % Map the concatenated ID to the value ID in MapStruct.
+           vID = values(obj.map_kID_vID, kID);
+           
+           % Return the designated value sets by mapping the value ID back
+           % to the value elements.
+           valueSet = struct();
+           for i = 1:numel(inValueName)
+               if ismember(inValueName{i}, mValueName)
+                   valueSet.(inValueName{i}) = values( ...
+                       obj.structmap_vID_value.(inValueName{i}), vID);
+                   if ~strcmp(obj.valueType.(inValueName{i}), 'cell')
+                       valueSet.(inValueName{i}) = cell2mat(valueSet,(inValueName{i}));
+                   end
+               end
+           end
+           
+       end
+       
+       function keySet = mskeys(obj)
+           % MSKEYS Returns a struct of unique keys in the MapStruct.
+           %
+           % KS = MSKEYS(MS) returns a struct of keys in KS from each
+           % mapping field in MapStruct MS.
+           
+           % Check no. of input arguments.
+           narginchk(1, 1)
+           
+           % Return struct of keys.
+           keySet = structfun(@keys, obj.structmap_key_id, 'UniformOutput', false);
+           
+       end
+       
+   end
+end
